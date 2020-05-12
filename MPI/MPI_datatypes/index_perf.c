@@ -37,6 +37,8 @@ OF THE POSSIBILITY OF SUCH DAMAGE.
     ret;                                    \
 })
 
+#define DEBUG(EXP) {fprintf(stderr, "DEBUG(%d): " #EXP " = %d\n", rank, EXP);}
+
 #define MAX_DESC_CNT    16
 #define MAX_DESC_LEN    1024
 #define WINDOW_SIZE     1
@@ -86,12 +88,13 @@ void measure_cycle(int wsize,
 
 void usage(int rank, int argc, char **argv) {
     if (rank == 0) {
-        fprintf(stderr, "Usage: %s [-h|-d <datatype description>|-i <iterations>|-s <umr repcount>|-w <window size>|-x <warmups>]\n", argv[0]);
+        fprintf(stderr, "Usage: %s [-h|-d <datatype description>|-i <iterations>|-s <umr repcount>|-v|-w <window size>|-x <warmups>]\n", argv[0]);
         fprintf(stderr, "    -h                           this help page\n");
         fprintf(stderr, "    -d <datatype description>    format has to be <interleave>:<repcount>:<block>:<stride>\n");
         fprintf(stderr, "                                 multiple of them can be cancatenated\n");
         fprintf(stderr, "    -i <iterations>              number of iterations\n");
         fprintf(stderr, "    -s <umr repcount>            split mode, <umr repcount> is the <repcount> for UMR portion\n");
+        fprintf(stderr, "    -v                           verify\n");
         fprintf(stderr, "    -w <window size>             window size\n");
         fprintf(stderr, "    -x <warmups>                 number of warmups\n");
     }
@@ -161,6 +164,7 @@ int main(int argc, char **argv)
     int split_mode = 0;
     int desc_cnt = 0;
     int msg_size = 0;
+    int verify = 0;
     char dt_desc[MAX_DESC_CNT][MAX_DESC_LEN];
     message_desc_t *scenario, *scenario_split;
 
@@ -186,7 +190,7 @@ int main(int argc, char **argv)
 
     memset(dt_desc, '\0', sizeof(dt_desc));
 
-    while ((opt = getopt(argc, argv, ":hd:i:s:w:x:")) != -1) {
+    while ((opt = getopt(argc, argv, ":hd:i:s:vw:x:")) != -1) {
         switch (opt) {
             case 'd':
                 desc_cnt++;
@@ -213,6 +217,9 @@ int main(int argc, char **argv)
                 break;
             case 's':
                 umr_split = atoi(optarg);
+                break;
+            case 'v':
+                verify = 1;
                 break;
             case 'w':
                 wsize = atoi(optarg);
@@ -273,19 +280,28 @@ int main(int argc, char **argv)
     message_t *msgs[wsize], *msgs_split[wsize];
     MPI_Datatype types[wsize], types_split[wsize];
     char *recv_bufs[wsize], *recv_bufs_split[wsize];
-    int i;
+    int i, j;
 
     for(i = 0; i < wsize; i++){
         if (split_mode) {
             setenv("OMPI_WANT_UMR", "1", 1);
             create_mpi_index(0, NULL, 0, 0, 0, scenario, desc_cnt, &types[i], &msgs[i]);
             ALLOC(recv_bufs[i], msgs[i]->outlen);
+            for(j = 0; j < scenario->rcnt * scenario->strides[0]; j++) {
+                msgs[i]->base_addr[j] = 'a';
+            }
             unsetenv("OMPI_WANT_UMR");
             create_mpi_index(0, NULL, 0, 0, 0, scenario_split, desc_cnt, &types_split[i], &msgs_split[i]);
             ALLOC(recv_bufs_split[i], msgs_split[i]->outlen);
+            for(j = 0; j < scenario_split->rcnt * scenario_split->strides[0]; j++) {
+                msgs_split[i]->base_addr[j] = 'a';
+            }
         } else {
             create_mpi_index(0, NULL, 0, 0, 0, scenario, desc_cnt, &types[i], &msgs[i]);
             ALLOC(recv_bufs[i], msgs[i]->outlen);
+            for(j = 0; j < scenario->rcnt * scenario->strides[0]; j++) {
+                msgs[i]->base_addr[j] = 'a';
+            }
         }
     }
 
@@ -295,6 +311,25 @@ int main(int argc, char **argv)
     double start = GET_TS();
     measure_cycle(wsize, types, msgs, recv_bufs, types_split, msgs_split, recv_bufs_split, split_mode, iterations);
     double end = GET_TS();
+
+    if (verify) {
+        for (i = 0; i < wsize; i++) {
+            for (j = 0; j < msgs[i]->outlen; j++) {
+                if ('a' != recv_bufs[i][j]) {
+                    fprintf(stderr, "verification error at recv_bufs[%d][%d]\n", i, j);
+                    break;
+                }
+            }
+            if (split_mode) {
+                for (j = 0; j < msgs_split[i]->outlen; j++) {
+                    if ('a' != recv_bufs_split[i][j]) {
+                        fprintf(stderr, "verification error at recv_bufs_split[%d][%d]\n", i, j);
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
     if(0 == rank) {
         fprintf(stdout, "window size = %d, iterations = %d, msg size = %d\n", wsize, iterations, msg_size);
